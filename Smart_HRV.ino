@@ -33,7 +33,8 @@ float setpointOff = 55;
 float humOn = setpointOn;
 float humOff = setpointOff;
 float hMin = setpointOff; // Intitialize minimum humidity that can be obtained
-int humVal = 55;
+float rft;
+//int humVal = 55; // moved to local variable to free memory
 byte prehumcmd = 0;
 int debug = 0;
 String dataList = "";
@@ -50,6 +51,13 @@ void setup() {
   digitalWrite(13, LOW);    // turn the LED off by making the voltage LOW to save a little energy
   pinMode(dehumPin, INPUT_PULLUP);
   pinMode(fanPin, INPUT_PULLUP);
+
+  int chk = DHT.read21(refPIN);
+  if (chk == 0 ) {
+    rft = DHT.temperature;
+  }
+  // Convert rft to Fahrenheit
+  rft = rft * 1.8 + 32;
 
   // Initialize startup handshake
   startup();
@@ -71,14 +79,15 @@ void loop() {
   //  if (Serial.available() >= 0) {
   RxByte = read_Tx(); // Read any incoming signals from HRV unit
 
+
   // Check relay pins for status of thermostat calls
   if (dhtState == 0) {
-    CheckRelays();
+    CheckRelays(rft);
   }
   SetRelays();
 
   // Humidity sensors take precedent over relays or HRV/Timer commands
-  CheckHumidity();
+  rft = CheckHumidity();
 
   /* Get commands from TxSerial monitor and send as digital byte
     to HRV. Note that placement of TxSerial read here allows manual commands to
@@ -290,12 +299,13 @@ void startup() {
    equilibrate humidity in the house until the maximum of desired setpoint or lowest humidity possible is
    reached.
 */
-void CheckHumidity(void) {
+float CheckHumidity(void) {
 
   float mbh;
   float gbh;
   float rfh;
-  float rft;
+  //float rft;
+  int humVal;
 
 
   int chk = DHT.read22(mBathPIN);
@@ -413,11 +423,12 @@ void CheckHumidity(void) {
     TxSerial.print("cmd: ");
     TxSerial.println(cmd);
   }
+  return rft;
 }
 
 ///////////////////////////////// Check Relay Pins for Input Commands ////////////////////////////
 
-void CheckRelays(void) {
+void CheckRelays(float rft) {
   wdt_reset();
   if (debug >= 4) {
     TxSerial.println("Checking Relay Status...");
@@ -429,10 +440,17 @@ void CheckRelays(void) {
   fp = digitalRead(fanPin);
   dhp = digitalRead(dehumPin);
 
-  if ( fp == 0) { // check fan state first to give precedent to dehumidify // and last_cmd != 140
-    cmd = 140;
-    digitalWrite(13, HIGH);
-    fanPinState = 1;
+  if ( fp == 0) { // check fan state first to give precedent to dehumidify
+    if (rft > 15) { // don't initiate fresh air exchange if outside temp is too cold
+      cmd = 140;
+      digitalWrite(13, HIGH);
+      fanPinState = 1;
+    }
+    else {
+      if (debug >= 3) {
+        TxSerial.println ("Cold temperature lockout engaged");
+      }
+    }
 
   }
 
@@ -729,8 +747,8 @@ void Debug(void) {
     TxSerial.println(humOn);
     TxSerial.print("humOff: ");
     TxSerial.println(humOff);
-    TxSerial.print("humVal: ");
-    TxSerial.println(humVal);
+    //    TxSerial.print("humVal: ");
+    //    TxSerial.println(humVal);
     TxSerial.print("hMin: ");
     TxSerial.println(hMin);
     TxSerial.print("prehumcmd: ");
