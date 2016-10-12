@@ -410,8 +410,8 @@ float CheckHumidity(void) {
       dhtState = 1;
     }
   }
-  else if (h <= humOff and h <= hMin and dhtState == 1) {
-    if (prehumcmd == 76) cmd = 236;
+  else if (h <= humOff and h <= (hMin + 5) and dhtState == 1) {
+    if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
     else cmd = prehumcmd;
     if (debug >= 4) {
       TxSerial.println("Humidity call ended");
