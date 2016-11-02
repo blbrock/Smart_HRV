@@ -45,3 +45,15 @@ $RECYCLE.BIN/
 Network Trash Folder
 Temporary Items
 .apdisk
+
+#Eagele CAD Job Files
+*.job
+*.?#?
+
+#Development Files
+dev/
+*dev*
+*.old
+*test*
+*.log
+*.pyc
