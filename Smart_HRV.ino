@@ -240,7 +240,6 @@ void startup() {
       }
     }
 
-
     for (int times = 0; times < 10; times++) {
       RxByte = read_Tx();
       if (RxByte == 220) {
@@ -332,8 +331,87 @@ float CheckHumidity(void) {
   rft = rft * 1.8 + 32;
 
   float h = max(mbh, gbh);
-  // hMin = min(mbh, gbh) + 5; // add 5% to avoid endless recirculation
+  // Calculate minimum humidity that can be achieved
+  float minHum = min(rfh + 2, (min(mbh, gbh) + 5));
 
+  if (debug == 0) {
+    dataList = String(rft) + ',' + String(int(round(rfh))) + ',' + String(int(round(mbh))) + ',' + String(int(round(gbh))) + ',';
+  }
+
+  // Set target humidity based on outside temperature
+  if (isnan(rfh) == false) {
+    if (isnan(rft) == false) {
+      humTarget = float(((0.55 * rft) + 31) - 2.5);
+    }
+
+    // Set max humidity to 60% if possible
+    if (humTarget > 60 and minHum < 60) {
+      humTarget = 60;
+    }
+    /* if minimum achievable humidity is > humTarget, adjust humidity setpoints
+      to minimum humidity possible */
+    if (humTarget < minHum) {
+      humOff = minHum;
+      humOn = minHum + 5;
+    }
+
+    // Shut off HRV when humidity drops to target or minimum achievable humidity
+    else {
+      humOff = humTarget;
+    }
+    humOn = humOff + 5;
+
+    // Set HRV to recirculate if possible to conserve heat
+    if (h > min(mbh, gbh)) {
+      recirc = 1;
+      if (debug >= 2 and last_cmd == 172) {
+        TxSerial.println("Running in recirculation mode.");
+      }
+    }
+    else {
+      recirc = 0;
+    }
+  }
+
+  if (h >= humOn and recirc == 0) { //and dhtState == 0
+    if (last_cmd != 0) {
+      prehumcmd = last_cmd;
+    }
+    else prehumcmd = 236;
+
+    cmd = 76;
+    dhtState = 1;
+
+    if (debug >= 2) {
+      TxSerial.println("High humidity detected!");
+    }
+  }
+  /* Remove as much humidity in recirculation mode
+     as possible to conserve heat.
+  */
+  else if (h >= humOn and recirc == 1) {
+    if (last_cmd != 0 and last_cmd != 76 and last_cmd != 172) {
+      prehumcmd = last_cmd;
+    }
+    else prehumcmd = 236;
+
+    cmd = 172;
+    dhtState = 1;
+    
+    if (debug >= 2) {
+      TxSerial.print("h: ");
+      TxSerial.println(h);
+    }
+  }
+  
+  else if (h <= humOff and dhtState == 1) { //and h <= hMin
+    if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
+    else cmd = prehumcmd;
+    if (debug >= 4) {
+      TxSerial.println("Humidity call ended");
+    }
+    dhtState = 0;
+  }
   if (debug >= 1) {
     TxSerial.print("Outside TEMP: ");
     TxSerial.println(rft);
@@ -343,93 +421,19 @@ float CheckHumidity(void) {
     TxSerial.println(mbh);
     TxSerial.print("Guest Bath RH: ");
     TxSerial.println(gbh);
-  }
-  if (debug == 0) {
-    dataList = String(rft) + ',' + String(int(round(rfh))) + ',' + String(int(round(mbh))) + ',' + String(int(round(gbh))) + ',';
-  }
-
-  // Set target humidity based on outside temperature
-  if (isnan(rfh) == false) {
-    if (isnan(rft) == false) {
-      humTarget = round(float((0.55 * rft) + 31));
-    }
     if (debug >= 2) {
-      TxSerial.print("Target Humidity: ");
+      TxSerial.print("humTarget: ");
       TxSerial.println(humTarget);
-    }
-
-    //    humOff = humTarget;
-    /* if outside humidity is > humOff, adjust humidity setpoints
-      to outside humidity plus 2% for Off and outside humidity + 8% for On */
-    if (humTarget < rfh ) {
-      humOff = rfh + 2;
-      humOn = rfh + 8;
-      recirc = 1;
-    }
-    else {
-      // Shut off HRV when humidity drops to target or minimum achievable humidity
-      humOff = max((min(mbh, gbh) + 5), humTarget);
-      humOn = humOff + 8;
-      recirc = 0;
-    }
-    if (debug >= 2) {
-      TxSerial.print("Humidity Off: ");
+      TxSerial.print("humOn: ");
+      TxSerial.println(humOn);
+      TxSerial.print("humOff: ");
       TxSerial.println(humOff);
+      if (debug >= 4) {
+        TxSerial.println("End Check Humidity");
+        TxSerial.print("cmd: ");
+        TxSerial.println(cmd);
+      }
     }
-    // Set minimum hum value for recirculation
-    // hMin = max((min(mbh, gbh) + 5), humTarget);
-
-  }
-  //  else {
-  //    humOn = setpointOn;
-  //    humOff = setpointOff;
-  //    // hMin = setpointOff;
-  //  }
-
-
-  if (h >= humOn and recirc == 0) { //and dhtState == 0
-    if (debug >= 2) {
-      TxSerial.println("High humidity detected!");
-    }
-    if (last_cmd != 0) {
-      prehumcmd = last_cmd;
-    }
-    else prehumcmd = 236;
-
-    cmd = 76;
-    dhtState = 1;
-  }
-  /* If outside humidity too high to lower humidity to desired level, run in recirculation mode
-     if possible.
-  */
-  else if (h >= humOn and recirc == 1) {
-    if (debug >= 2) {
-      TxSerial.println("High Outdoor Humidity Detected. Running in recirculation mode.");
-      TxSerial.print("h: ");
-      TxSerial.println(h);
-    }
-    //    if (h >= hMin + 5) { // add 5% to on value to prevent short cycling
-    if (last_cmd != 0 and last_cmd != 76 and last_cmd != 172) {
-      prehumcmd = last_cmd;
-    }
-    else prehumcmd = 236;
-
-    cmd = 172;
-    dhtState = 1;
-  }
-  //  }
-  else if (h <= humOff and dhtState == 1) { //and h <= hMin
-    if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
-    else cmd = prehumcmd;
-    if (debug >= 4) {
-      TxSerial.println("Humidity call ended");
-    }
-    dhtState = 0;
-  }
-  if (debug >= 4) {
-    TxSerial.println("End Check Humidity");
-    TxSerial.print("cmd: ");
-    TxSerial.println(cmd);
   }
   return rft;
 }
@@ -455,7 +459,7 @@ void CheckRelays(float rft) {
       fanPinState = 1;
     }
     else {
-      if (debug >= 3) {
+      if (debug >= 2) {
         TxSerial.println ("Cold temperature lockout engaged");
       }
     }
@@ -565,7 +569,6 @@ void AutoOffRecirc(void) {
 }
 
 /////////////////////////////////// Fresh Aire Exchange Modes /////////////////////////////////////
-
 void Xchange(void) {
   wdt_reset();
   if (debug >= 4) {
@@ -651,7 +654,7 @@ void Timer(void) {
   }
   StopTimer();
 }
-//Stop Timer
+/////Stop Timer
 void StopTimer(void) {
   write_Tx(252);
   for (int times = 0; times < 10; times++) {
@@ -764,7 +767,7 @@ void Debug(void) {
     TxSerial.println("########################################");
     readEEPROM();
   }
-  cmd = 0;
+  //cmd = 0;
 }
 
 /////////////////////////////////////////// Interactive Mode for Debugging Only //////////////////////////////
