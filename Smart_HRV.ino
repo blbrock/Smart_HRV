@@ -28,13 +28,14 @@ const int fanPin = 3;
 int fanPinState = 0;
 int fp = 1;
 int dhtState = 0;
-float setpointOn = 60;
-float setpointOff = 55;
-float humOn = setpointOn;
-float humOff = setpointOff;
-float hMin = setpointOff; // Intitialize minimum humidity that can be obtained
+int minTempThresh = 15;
+//float setpointOn = 60;
+//float setpointOff = 55;
+//float humOn = setpointOn;
+//float humOff = setpointOff;
+//float hMin = setpointOff; // Intitialize minimum humidity that can be obtained
 float rft;
-//int humVal = 55; // moved to local variable to free memory
+//int humTarget = 55; // moved to local variable to free memory
 byte prehumcmd = 0;
 int debug = 0;
 String dataList = "";
@@ -76,7 +77,6 @@ void loop() {
   dataList = "";
   wdt_reset();
   // Get commands from HRV
-  //  if (Serial.available() >= 0) {
   RxByte = read_Tx(); // Read any incoming signals from HRV unit
 
 
@@ -305,7 +305,11 @@ float CheckHumidity(void) {
   float gbh;
   float rfh;
   //float rft;
-  int humVal;
+  int humTarget;
+  float humOn; // = setpointOn;
+  float humOff; // = setpointOff;
+  float hMin; // = setpointOff;
+  int recirc;
 
 
   int chk = DHT.read22(mBathPIN);
@@ -328,7 +332,7 @@ float CheckHumidity(void) {
   rft = rft * 1.8 + 32;
 
   float h = max(mbh, gbh);
-  hMin = min(mbh, gbh);
+  // hMin = min(mbh, gbh) + 5; // add 5% to avoid endless recirculation
 
   if (debug >= 1) {
     TxSerial.print("Outside TEMP: ");
@@ -347,39 +351,43 @@ float CheckHumidity(void) {
   // Set target humidity based on outside temperature
   if (isnan(rfh) == false) {
     if (isnan(rft) == false) {
-      humVal = round(float((0.55 * rft) + 31));
+      humTarget = round(float((0.55 * rft) + 31));
     }
     if (debug >= 2) {
       TxSerial.print("Target Humidity: ");
-      TxSerial.println(humVal);
+      TxSerial.println(humTarget);
     }
-    // Changed this to ignore setpointOff to reduce amount of time HRV runs to dehumidify bathrooms
-    // humOff = min(humVal, setpointOff);
-    humOff = humVal;
+
+    //    humOff = humTarget;
     /* if outside humidity is > humOff, adjust humidity setpoints
-      to outside humidity plus 1% for Off and outside humidity + 6% for On */
-    if (humOff < rfh ) {
-      humOff = rfh + 1;
-      humOn = rfh + 6;
+      to outside humidity plus 2% for Off and outside humidity + 8% for On */
+    if (humTarget < rfh ) {
+      humOff = rfh + 2;
+      humOn = rfh + 8;
+      recirc = 1;
+    }
+    else {
+      // Shut off HRV when humidity drops to target or minimum achievable humidity
+      humOff = max((min(mbh, gbh) + 5), humTarget);
+      humOn = humOff + 8;
+      recirc = 0;
     }
     if (debug >= 2) {
       TxSerial.print("Humidity Off: ");
       TxSerial.println(humOff);
     }
     // Set minimum hum value for recirculation
-    // Changed this to ignore setpointOff to reduce amount of time HRV runs to dehumidify bathrooms
-    //    hMin = max(hMin, min(humVal, setpointOff));
-    hMin = max(hMin, humVal);
+    // hMin = max((min(mbh, gbh) + 5), humTarget);
 
   }
-  else {
-    humOn = setpointOn;
-    humOff = setpointOff;
-    hMin = setpointOff;
-  }
+  //  else {
+  //    humOn = setpointOn;
+  //    humOff = setpointOff;
+  //    // hMin = setpointOff;
+  //  }
 
 
-  if (h >= humOn ) { //and dhtState == 0
+  if (h >= humOn and recirc == 0) { //and dhtState == 0
     if (debug >= 2) {
       TxSerial.println("High humidity detected!");
     }
@@ -394,24 +402,24 @@ float CheckHumidity(void) {
   /* If outside humidity too high to lower humidity to desired level, run in recirculation mode
      if possible.
   */
-  else if (h >= hMin and h <= humOff and hMin < humOff) {
+  else if (h >= humOn and recirc == 1) {
     if (debug >= 2) {
       TxSerial.println("High Outdoor Humidity Detected. Running in recirculation mode.");
       TxSerial.print("h: ");
       TxSerial.println(h);
     }
-    if (h >= hMin + 5) { // add 5% to on value to prevent short cycling
-      if (last_cmd != 0 and last_cmd != 76 and last_cmd != 172) {
-        prehumcmd = last_cmd;
-      }
-      else prehumcmd = 236;
-
-      cmd = 172;
-      dhtState = 1;
+    //    if (h >= hMin + 5) { // add 5% to on value to prevent short cycling
+    if (last_cmd != 0 and last_cmd != 76 and last_cmd != 172) {
+      prehumcmd = last_cmd;
     }
+    else prehumcmd = 236;
+
+    cmd = 172;
+    dhtState = 1;
   }
-  else if (h <= humOff and h <= hMin and dhtState == 1) {
-    if (prehumcmd == 76) cmd = 236;
+  //  }
+  else if (h <= humOff and dhtState == 1) { //and h <= hMin
+    if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
     else cmd = prehumcmd;
     if (debug >= 4) {
       TxSerial.println("Humidity call ended");
@@ -441,7 +449,7 @@ void CheckRelays(float rft) {
   dhp = digitalRead(dehumPin);
 
   if ( fp == 0) { // check fan state first to give precedent to dehumidify
-    if (rft > 15) { // don't initiate fresh air exchange if outside temp is too cold
+    if (rft > minTempThresh) { // don't initiate fresh air exchange if outside temp is too cold
       cmd = 140;
       digitalWrite(13, HIGH);
       fanPinState = 1;
@@ -743,14 +751,14 @@ void Debug(void) {
     TxSerial.println(dehumPinState);
     TxSerial.print("fanPinState: ");
     TxSerial.println(fanPinState);
-    TxSerial.print("humOn: ");
-    TxSerial.println(humOn);
-    TxSerial.print("humOff: ");
-    TxSerial.println(humOff);
-    //    TxSerial.print("humVal: ");
-    //    TxSerial.println(humVal);
-    TxSerial.print("hMin: ");
-    TxSerial.println(hMin);
+    //    TxSerial.print("humOn: ");
+    //    TxSerial.println(humOn);
+    //    TxSerial.print("humOff: ");
+    //    TxSerial.println(humOff);
+    //    TxSerial.print("humTarget: ");
+    //    TxSerial.println(humTarget);
+    //    TxSerial.print("hMin: ");
+    //    TxSerial.println(hMin);
     TxSerial.print("prehumcmd: ");
     TxSerial.println(prehumcmd);
     TxSerial.println("########################################");
