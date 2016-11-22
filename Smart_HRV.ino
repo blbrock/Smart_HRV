@@ -26,7 +26,7 @@ int dehumPinState = 0;
 int dhp = 1;
 const int fanPin = 3;
 int fanPinState = 0;
-int fp = 1;
+// int fp = 1;
 int dhtState = 0;
 int minTempThresh = 15;
 //float setpointOn = 60;
@@ -78,12 +78,15 @@ void loop() {
   wdt_reset();
   // Get commands from HRV
   RxByte = read_Tx(); // Read any incoming signals from HRV unit
-
+  // Capture unknown commands
+  if (RxByte != 0 and RxByte != 220 and RxByte != 255 and RxByte != 92 and RxByte != 28 and RxByte != 188) {
+    Capture();
+  }
 
   // Check relay pins for status of thermostat calls
-  if (dhtState == 0) {
-    CheckRelays(rft);
-  }
+  //  if (dhtState == 0) {
+  CheckRelays(rft);
+  // }
   SetRelays();
 
   // Humidity sensors take precedent over relays or HRV/Timer commands
@@ -98,12 +101,15 @@ void loop() {
   if (TxSerial.available()) {
     byte tx = TxSerial.parseInt();
     // Set Debug level if it has changed
-    if (tx != debug and tx <= 5) {
+    if (tx != debug and tx <= 4) {
       debug = tx;
       TxSerial.print("Debug Level - ");
       TxSerial.println(debug);
     }
-    else if (tx > 5) cmd = tx; // Send manual comman
+    else if (tx == 5) {
+      ClearEeprom();
+    }
+    else if (tx > 5) cmd = tx; // Send manual command
     // Sometimes 0 values get stuck in buffer for some reason. This clears them out.
     if (tx == 0) {
       while (TxSerial.available()) {
@@ -140,15 +146,10 @@ void loop() {
     }
 
     // Enter debug mode
-    else if (cmd <= 5) {
+    else if (cmd <= 4) {
       if (cmd != 0) debug = cmd;
       else debug = 0;
       if (cmd >= 3)Debug();
-    }
-
-    // Capture unknown commands
-    else if (RxByte != 0 and RxByte != 220 and RxByte != 255 and RxByte != 92 and RxByte != 28 and RxByte != 188) {
-      Capture();
     }
 
     else {
@@ -169,7 +170,7 @@ void loop() {
   }
 
   delay(2000);
-  if (cmd <= 5) {
+  if (cmd <= 4) {
     Debug();
     delay(2000);
   }
@@ -293,10 +294,12 @@ void startup() {
 /*Checks multiple sensors for humidity and runs HRV to achieve optimal humidity. This routine automatically
    reduces humidity in bathrooms and other high humidity areas where sensors are installed. It also adjusts
    whole house humidity based on outside temperature to reduce condensation on windows during cold weather.
-   Dehumidifying with fresh air exchange takes precedent and occurs whenever outside humidity < desired
-   setpoint. If outside humidity is higher than desired setpoint, then air is recirculated to quickly
-   equilibrate humidity in the house until the maximum of desired setpoint or lowest humidity possible is
-   reached.
+   Recirculation takes precedent to minimize heat loss and occurs whenever minimum indoor humidity < desired
+   setpoint. If outside humidity is lower than desired setpoint and maximum indoor humidity is <= minimum indoor
+   humidity plus 5%, then fresh air is exchanges until the maximum of desired setpoint or lowest humidity possible
+   is reached. Fresh air will also be exchanged during a dehumidification cycle if thermostat is calling for
+   exchange, outside temp is above the minimum threshold, and outdoor humidity is low enough to allow dehumidification
+   to proceed.
 */
 float CheckHumidity(void) {
 
@@ -308,6 +311,7 @@ float CheckHumidity(void) {
   float humOn; // = setpointOn;
   float humOff; // = setpointOff;
   float hMin; // = setpointOff;
+  int dehumCall;
   int recirc;
 
 
@@ -331,6 +335,18 @@ float CheckHumidity(void) {
   rft = rft * 1.8 + 32;
 
   float h = max(mbh, gbh);
+
+  // Check dehumidity relay to see if Nest is calling for dehumidification
+  dhp = digitalRead(dehumPin);
+  if (dhp == 0 and h > humOff) {
+    digitalWrite(13, HIGH);
+    dehumPinState = 1;
+  }
+  else {
+    dehumPinState = 0;
+  }
+
+
   // Calculate minimum humidity that can be achieved
   float minHum = min(rfh + 2, (min(mbh, gbh) + 5));
 
@@ -361,19 +377,26 @@ float CheckHumidity(void) {
     }
     humOn = humOff + 5;
 
+    // Set dehumidication call on/off
+    if (h >= humOn or (dhp == 0 and h > humOff + 2)) {
+      dehumCall = 1;
+    }
+    else {
+      dehumCall = 0;
+    }
     // Set HRV to recirculate if possible to conserve heat
-    if (h > min(mbh, gbh)) {
+    if (h < min(mbh, gbh) or (fanPinState == 1 and rft < minTempThresh) or (rfh <= humOff and rft >= 50)) {
+      recirc = 0;
+    }
+    else {
       recirc = 1;
       if (debug >= 2 and last_cmd == 172) {
         TxSerial.println("Running in recirculation mode.");
       }
     }
-    else {
-      recirc = 0;
-    }
   }
-
-  if (h >= humOn and recirc == 0) { //and dhtState == 0
+  // Start dehumidification if humidity is > than target setpoint or Nest is calling for dehumidify
+  if (dehumCall == 1 and recirc == 0) {
     if (last_cmd != 0) {
       prehumcmd = last_cmd;
     }
@@ -389,7 +412,7 @@ float CheckHumidity(void) {
   /* Remove as much humidity in recirculation mode
      as possible to conserve heat.
   */
-  else if (h >= humOn and recirc == 1) {
+  else if (dehumCall == 1 and recirc == 1) {
     if (last_cmd != 0 and last_cmd != 76 and last_cmd != 172) {
       prehumcmd = last_cmd;
     }
@@ -397,14 +420,14 @@ float CheckHumidity(void) {
 
     cmd = 172;
     dhtState = 1;
-    
+
     if (debug >= 2) {
       TxSerial.print("h: ");
       TxSerial.println(h);
     }
   }
-  
-  else if (h <= humOff and dhtState == 1) { //and h <= hMin
+
+  else if (h <= humOff and dhtState == 1) {
     if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
     else cmd = prehumcmd;
     if (debug >= 4) {
@@ -449,12 +472,14 @@ void CheckRelays(float rft) {
     TxSerial.print("cmd: ");
     TxSerial.println(cmd);
   }
-  fp = digitalRead(fanPin);
+  int fp = digitalRead(fanPin);
   dhp = digitalRead(dehumPin);
 
-  if ( fp == 0) { // check fan state first to give precedent to dehumidify
+  if ( fp == 0) {
     if (rft > minTempThresh) { // don't initiate fresh air exchange if outside temp is too cold
-      cmd = 140;
+      if (dhtState == 0) { // CheckHumidity() will handle fresh air call if dehumidification in progress
+        cmd = 140;
+      }
       digitalWrite(13, HIGH);
       fanPinState = 1;
     }
@@ -463,14 +488,13 @@ void CheckRelays(float rft) {
         TxSerial.println ("Cold temperature lockout engaged");
       }
     }
-
   }
 
-  if (dhp == 0) { // check dehumidify second to override fan // and last_cmd != 76
-    cmd = 76;
-    digitalWrite(13, HIGH);
-    dehumPinState = 1;
-  }
+  //  if (dhp == 0) { // check dehumidify second to override fan // and last_cmd != 76
+  //    cmd = 76;
+  //  digitalWrite(13, HIGH);
+  // dehumPinState = 1;
+  //}
 
   if (fp == 1 and dhp == 1) digitalWrite(13, LOW);
   if (debug >= 4) {
@@ -482,6 +506,7 @@ void CheckRelays(float rft) {
 
 ///////////////////////////////// Set Relays to Appropriate State //////////////////////////////////////
 void SetRelays() {
+  int fp = digitalRead(fanPin);
   wdt_reset();
   if (fanPinState == 1 and fp == 1) {
     if (debug >= 4) {
@@ -491,46 +516,14 @@ void SetRelays() {
       TxSerial.print("last_cmd: ");
       TxSerial.println(last_cmd);
     }
-    if (dehumPinState != 1 and last_cmd != 0) {
-      if (last_cmd != 76 and last_cmd != 140) {
-        cmd = last_cmd;
-      }
-      else {
-        cmd = 236;
-      }
-      digitalWrite(13, LOW);
+    if (last_cmd != 140 and last_cmd != 0) {
+      cmd = last_cmd;
     }
+    else {
+      cmd = 236;
+    }
+    digitalWrite(13, LOW);
     fanPinState = 0;
-  }
-
-  if (dehumPinState == 1 and dhp == 1) {
-    if (debug >= 4) {
-      TxSerial.println("Starting dehum shutdown sequence...");
-      TxSerial.print ("fanPinState, last_cmd = ");
-      TxSerial.print(fanPinState);
-      TxSerial.print(", ");
-      TxSerial.println(last_cmd);
-    }
-    if (fanPinState == 0 and last_cmd != 0) {
-      digitalWrite(13, LOW);
-      if (last_cmd != 76 and last_cmd != 10) {
-        cmd = last_cmd;
-      }
-      else {
-        cmd = 236;
-      }
-      last_cmd = 0;
-    }
-    else if (fanPinState == 1 and last_cmd != 0) {
-      last_cmd = 0;
-      cmd = 140;
-    }
-    dehumPinState = 0;
-  }
-  if (debug >= 4) {
-    TxSerial.println("End Set Relay");
-    TxSerial.print("cmd: ");
-    TxSerial.println(cmd);
   }
 }
 
@@ -659,6 +652,8 @@ void StopTimer(void) {
   write_Tx(252);
   for (int times = 0; times < 10; times++) {
     wdt_reset();
+
+
     RxByte = read_Tx();
     if (RxByte != 28) {
       if (debug >= 4) {
@@ -716,6 +711,11 @@ void Capture(void) {
     else if (val == 0) {
       EEPROM.write(address, RxByte);
       break;
+      if (debug > 2) {
+        TxSerial.print("!!!!!!!!!!!!!!!- Unknown Command: ");
+        TxSerial.print(RxByte);
+        TxSerial.println(" -!!!!!!!!!!!!!!!");
+      }
     }
     write_Tx(188);
   }
@@ -729,7 +729,7 @@ void readEEPROM(void) {
   for (int address = 0 ; address < EEPROM.length() ; address++) {
     wdt_reset();
     byte val = EEPROM.read(address);
-    if (val > 0) {
+    if (val > 0 and val < 255) {
       TxSerial.println(val);
     }
     else if (val == 0) {
@@ -765,9 +765,32 @@ void Debug(void) {
     TxSerial.print("prehumcmd: ");
     TxSerial.println(prehumcmd);
     TxSerial.println("########################################");
-    readEEPROM();
+    if (debug > 3) {
+      readEEPROM();
+    }
   }
   //cmd = 0;
+}
+
+//////////////////////////////////////////////////// Clear Eeprom /////////////////////////////////////////////
+void ClearEeprom() {
+  /***
+    Iterate through each byte of the EEPROM storage.
+
+    Larger AVR processors have larger EEPROM sizes, E.g:
+    - Arduno Duemilanove: 512b EEPROM storage.
+    - Arduino Uno:        1kb EEPROM storage.
+    - Arduino Mega:       4kb EEPROM storage.
+
+    Rather than hard-coding the length, you should use the pre-provided length function.
+    This will make your code portable to all AVR processors.
+  ***/
+  TxSerial.print("Clearing EEPROM storage...");
+  for (int i = 0 ; i < EEPROM.length() ; i++) {
+    EEPROM.write(i, 0);
+    wdt_reset();
+  }
+    TxSerial.print("Clear EEPROM completed!");
 }
 
 /////////////////////////////////////////// Interactive Mode for Debugging Only //////////////////////////////
