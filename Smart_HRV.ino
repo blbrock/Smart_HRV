@@ -385,7 +385,7 @@ float CheckHumidity(void) {
       dehumCall = 0;
     }
     // Set HRV to recirculate if possible to conserve heat
-    if (h < min(mbh, gbh) or (fanPinState == 1 and rft < minTempThresh) or (rfh <= humOff and rft >= 50)) {
+    if ((h < min(mbh, gbh) and humOff < min(mbh, gbh) + 5) or (fanPinState == 1 and rft < minTempThresh) or (rfh <= humOff and rft >= 50)) {
       recirc = 0;
     }
     else {
@@ -790,7 +790,7 @@ void ClearEeprom() {
     EEPROM.write(i, 0);
     wdt_reset();
   }
-    TxSerial.print("Clear EEPROM completed!");
+  TxSerial.print("Clear EEPROM completed!");
 }
 
 /////////////////////////////////////////// Interactive Mode for Debugging Only //////////////////////////////
