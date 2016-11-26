@@ -21,6 +21,7 @@ dht DHT;
 byte cmd = 4;
 byte last_cmd;
 int RxByte;
+bool autoState = true;
 const int dehumPin = 2;
 int dehumPinState = 0;
 int dhp = 1;
@@ -84,10 +85,11 @@ void loop() {
   }
 
   // Check relay pins for status of thermostat calls
-  //  if (dhtState == 0) {
-  CheckRelays(rft);
-  // }
-  SetRelays();
+  if (autoState) {
+    CheckRelays(rft);
+    // }
+    SetRelays();
+  }
 
   // Humidity sensors take precedent over relays or HRV/Timer commands
   rft = CheckHumidity();
@@ -95,79 +97,10 @@ void loop() {
   /* Get commands from TxSerial monitor and send as digital byte
     to HRV. Note that placement of TxSerial read here allows manual commands to
     override any programatic commands set earlier in the loop */
-  if (debug >= 4) {
-    TxSerial.println("Listening for command");
-  }
-  if (TxSerial.available()) {
-    byte tx = TxSerial.parseInt();
-    // Set Debug level if it has changed
-    if (tx != debug and tx <= 4) {
-      debug = tx;
-      TxSerial.print("Debug Level - ");
-      TxSerial.println(debug);
-    }
-    else if (tx == 5) {
-      ClearEeprom();
-    }
-    else if (tx > 5) cmd = tx; // Send manual command
-    // Sometimes 0 values get stuck in buffer for some reason. This clears them out.
-    if (tx == 0) {
-      while (TxSerial.available()) {
-        TxSerial.read();
-      }
-    }
-  }
+  ManCmd();
 
-  // Don't send command if it is is zero or a repeat of last command sent
-  if ((cmd != 0 and cmd != last_cmd) or (RxByte == 92 or RxByte == 220)) {
-
-    if (cmd > 5) {
-      write_Tx(cmd);
-    }
-
-    ///// Execute HRV Requests /////
-
-    // Auto, Off, Recirculate Modes
-    if (cmd == 12 or cmd == 172 or cmd == 236) {
-      AutoOffRecirc();
-    }
-    // High, Low Fresh Air Exchange Modes
-
-    else if (cmd == 76 or cmd == 140) {
-      Xchange();
-    }
-    // 30-Minute Timer
-    else if (RxByte == 92) {
-      Timer();
-    }
-    // Acknowledge Keep Alive Request
-    else if (RxByte == 220 || RxByte == 28) {
-      Ak();
-    }
-
-    // Enter debug mode
-    else if (cmd <= 4) {
-      if (cmd != 0) debug = cmd;
-      else debug = 0;
-      if (cmd >= 3)Debug();
-    }
-
-    else {
-      TxSerial.println("Sending Manual Command");
-      write_Tx(cmd);
-      cmd = 0;
-    }
-  }
-
-  // Repeat Command Handler
-  else if (cmd != 0) {
-    if (debug == 1) {
-      TxSerial.println("Ignoring Repeat Command");
-    }
-    while (TxSerial.read() >= 0); // flush the receive buffer
-    while (Serial.read() >= 0); // flush the receive buffer
-    cmd = 0;
-  }
+  // Execute Commands
+  ExecCmds();
 
   delay(2000);
   if (cmd <= 4) {
@@ -180,6 +113,17 @@ void loop() {
     TxSerial.println(dataList);
   }
   Serial.flush(); // flush any bytes remainining in sending buffer
+
+ // If manual mode lasts > 4 hours, return to automatic mode
+  if (!autoState) {
+    unsigned long startTime = 0;
+    startTime = millis();
+    if (millis() - startTime > 14400000) {
+      cmd = 236;
+      autoState = true;
+      startTime = 0;
+    }
+  }
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -348,7 +292,8 @@ float CheckHumidity(void) {
 
 
   // Calculate minimum humidity that can be achieved
-  float minHum = min(rfh + 2, (min(mbh, gbh) + 5));
+  float minRecirc = min(mbh, gbh) + 5;
+  float minHum = min(rfh + 2, minRecirc);
 
   if (debug == 0) {
     dataList = String(rft) + ',' + String(int(round(rfh))) + ',' + String(int(round(mbh))) + ',' + String(int(round(gbh))) + ',';
@@ -385,7 +330,7 @@ float CheckHumidity(void) {
       dehumCall = 0;
     }
     // Set HRV to recirculate if possible to conserve heat
-    if ((h < min(mbh, gbh) and humOff < min(mbh, gbh) + 5) or (fanPinState == 1 and rft < minTempThresh) or (rfh <= humOff and rft >= 50)) {
+    if ((h < minRecirc and humOff < minRecirc) or (fanPinState == 1 and rft < minTempThresh) or (rfh <= humOff and rft >= 50)) {
       recirc = 0;
     }
     else {
@@ -402,11 +347,13 @@ float CheckHumidity(void) {
     }
     else prehumcmd = 236;
 
-    cmd = 76;
-    dhtState = 1;
+    if (autoState) {
+      cmd = 76;
+      dhtState = 1;
 
-    if (debug >= 2) {
-      TxSerial.println("High humidity detected!");
+      if (debug >= 2) {
+        TxSerial.println("High humidity detected!");
+      }
     }
   }
   /* Remove as much humidity in recirculation mode
@@ -418,22 +365,26 @@ float CheckHumidity(void) {
     }
     else prehumcmd = 236;
 
-    cmd = 172;
-    dhtState = 1;
+    if (autoState) {
+      cmd = 172;
+      dhtState = 1;
 
-    if (debug >= 2) {
-      TxSerial.print("h: ");
-      TxSerial.println(h);
+      if (debug >= 2) {
+        TxSerial.print("h: ");
+        TxSerial.println(h);
+      }
     }
   }
 
   else if (h <= humOff and dhtState == 1) {
-    if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
-    else cmd = prehumcmd;
-    if (debug >= 4) {
-      TxSerial.println("Humidity call ended");
+    if (autoState) {
+      if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
+      else cmd = prehumcmd;
+      if (debug >= 4) {
+        TxSerial.println("Humidity call ended");
+      }
+      dhtState = 0;
     }
-    dhtState = 0;
   }
   if (debug >= 1) {
     TxSerial.print("Outside TEMP: ");
@@ -490,12 +441,6 @@ void CheckRelays(float rft) {
     }
   }
 
-  //  if (dhp == 0) { // check dehumidify second to override fan // and last_cmd != 76
-  //    cmd = 76;
-  //  digitalWrite(13, HIGH);
-  // dehumPinState = 1;
-  //}
-
   if (fp == 1 and dhp == 1) digitalWrite(13, LOW);
   if (debug >= 4) {
     TxSerial.println("End Check Relay");
@@ -526,6 +471,97 @@ void SetRelays() {
     fanPinState = 0;
   }
 }
+
+/////////////////////////// Execute Commands ///////////////////////////
+void ExecCmds() {
+  // Don't send command if it is is zero or a repeat of last command sent
+  if ((cmd != 0 and cmd != last_cmd) or (RxByte == 92 or RxByte == 220)) {
+
+    if (cmd > 5) {
+      write_Tx(cmd);
+    }
+
+    ///// Execute HRV Requests /////
+    // Auto, Off, Recirculate Modes
+    if (cmd == 12 or cmd == 172 or cmd == 236) {
+      if (cmd == 236) autoState = true;
+      AutoOffRecirc();
+    }
+    // High, Low Fresh Air Exchange Modes
+
+    else if (cmd == 76 or cmd == 140) {
+      Xchange();
+    }
+    // 30-Minute Timer
+    else if (RxByte == 92) {
+      Timer();
+    }
+    // Acknowledge Keep Alive Request
+    else if (RxByte == 220 || RxByte == 28) {
+      Ak();
+    }
+
+    // Enter debug mode
+    else if (cmd <= 4) {
+      if (cmd != 0) debug = cmd;
+      else debug = 0;
+      if (cmd >= 3)Debug();
+    }
+
+    else {
+      TxSerial.println("Sending Manual Command");
+      write_Tx(cmd);
+      cmd = 0;
+    }
+  }
+
+  // Repeat Command Handler
+  else if (cmd != 0) {
+    if (debug == 1) {
+      TxSerial.println("Ignoring Repeat Command");
+    }
+    while (TxSerial.read() >= 0); // flush the receive buffer
+    while (Serial.read() >= 0); // flush the receive buffer
+    cmd = 0;
+  }
+
+}
+/////////////////////////////////////// Manual Command Mode ///////////////////////////////////////
+/* Get commands from TxSerial monitor and send as digital byte
+  to HRV. Note that placement of TxSerial read here allows manual commands to
+  override any programatic commands set earlier in the loop */
+
+void ManCmd() {
+  if (debug >= 4) {
+    TxSerial.println("Listening for command");
+  }
+  if (TxSerial.available()) {
+    byte tx = TxSerial.parseInt();
+    // Set Debug level if it has changed
+    if (tx != debug and tx <= 4) {
+      debug = tx;
+      TxSerial.print("Debug Level - ");
+      TxSerial.println(debug);
+    }
+    else if (tx == 5) {
+      ClearEeprom();
+    }
+    else if (tx > 5) cmd = tx; // Send manual command
+    // Enter manual command mode
+    if (cmd != 236) autoState = false;
+    // Exit manual command mode
+    else {
+      autoState = true;
+    }
+    // Sometimes 0 values get stuck in buffer for some reason. This clears them out.
+    if (tx == 0) {
+      while (TxSerial.available()) {
+        TxSerial.read();
+      }
+    }
+  }
+}
+
 
 /////////////////// Auto, Off and Recirculate Modes ////////////////////
 void AutoOffRecirc(void) {
