@@ -29,7 +29,7 @@ const int fanPin = 3;
 int fanPinState = 0;
 // int fp = 1;
 int dhtState = 0;
-int minTempThresh = 15;
+int minTempThresh = 5;
 //float setpointOn = 60;
 //float setpointOff = 55;
 //float humOn = setpointOn;
@@ -114,7 +114,7 @@ void loop() {
   }
   Serial.flush(); // flush any bytes remainining in sending buffer
 
- // If manual mode lasts > 4 hours, return to automatic mode
+  // If manual mode lasts > 4 hours, return to automatic mode
   if (!autoState) {
     unsigned long startTime = 0;
     startTime = millis();
@@ -292,7 +292,7 @@ float CheckHumidity(void) {
 
 
   // Calculate minimum humidity that can be achieved
-  float minRecirc = min(mbh, gbh) + 5;
+  float minRecirc = min(mbh, gbh) + 4;
   float minHum = min(rfh + 2, minRecirc);
 
   if (debug == 0) {
@@ -341,38 +341,41 @@ float CheckHumidity(void) {
     }
   }
   // Start dehumidification if humidity is > than target setpoint or Nest is calling for dehumidify
-  if (dehumCall == 1 and recirc == 0) {
-    if (last_cmd != 0) {
+  if (dehumCall == 1) {
+    if (last_cmd != 0 and last_cmd != 76 and last_cmd != 172) {
       prehumcmd = last_cmd;
     }
     else prehumcmd = 236;
+    if (recirc == 0) {
 
-    if (autoState) {
-      cmd = 76;
-      dhtState = 1;
+      //    if (last_cmd != 0) {
+      //      prehumcmd = last_cmd;
+      //    }
+      //    else prehumcmd = 236;
+
+      if (autoState) {
+        cmd = 76;
+        dhtState = 1;
+      }
+
 
       if (debug >= 2) {
         TxSerial.println("High humidity detected!");
       }
     }
-  }
-  /* Remove as much humidity in recirculation mode
-     as possible to conserve heat.
-  */
-  else if (dehumCall == 1 and recirc == 1) {
-    if (last_cmd != 0 and last_cmd != 76 and last_cmd != 172) {
-      prehumcmd = last_cmd;
-    }
-    else prehumcmd = 236;
-
-    if (autoState) {
-      cmd = 172;
-      dhtState = 1;
-
-      if (debug >= 2) {
-        TxSerial.print("h: ");
-        TxSerial.println(h);
+    /* Remove as much humidity in recirculation mode
+       as possible to conserve heat.
+    */
+    else if (recirc == 1) {
+      if (autoState) {
+        cmd = 172;
+        dhtState = 1;
       }
+    }
+
+    if (debug >= 2) {
+      TxSerial.print("h: ");
+      TxSerial.println(h);
     }
   }
 
@@ -380,10 +383,10 @@ float CheckHumidity(void) {
     if (autoState) {
       if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
       else cmd = prehumcmd;
-      if (debug >= 4) {
-        TxSerial.println("Humidity call ended");
-      }
       dhtState = 0;
+    }
+    if (debug >= 4) {
+      TxSerial.println("Humidity call ended");
     }
   }
   if (debug >= 1) {
@@ -474,8 +477,9 @@ void SetRelays() {
 
 /////////////////////////// Execute Commands ///////////////////////////
 void ExecCmds() {
+  if (cmd == 236) autoState = true;
   // Don't send command if it is is zero or a repeat of last command sent
-  if ((cmd != 0 and cmd != last_cmd) or (RxByte == 92 or RxByte == 220)) {
+  if ((cmd != 0 and cmd != last_cmd) or (RxByte == 92 or RxByte == 220 or cmd == 236)) {
 
     if (cmd > 5) {
       write_Tx(cmd);
@@ -484,7 +488,6 @@ void ExecCmds() {
     ///// Execute HRV Requests /////
     // Auto, Off, Recirculate Modes
     if (cmd == 12 or cmd == 172 or cmd == 236) {
-      if (cmd == 236) autoState = true;
       AutoOffRecirc();
     }
     // High, Low Fresh Air Exchange Modes
@@ -546,13 +549,15 @@ void ManCmd() {
     else if (tx == 5) {
       ClearEeprom();
     }
-    else if (tx > 5) cmd = tx; // Send manual command
-    // Enter manual command mode
-    if (cmd != 236) autoState = false;
-    // Exit manual command mode
-    else {
-      autoState = true;
+    else if (tx > 5) {
+      cmd = tx; // Send manual command
+      // Enter manual command mode
+      if (cmd != 236) autoState = false;
     }
+    // Exit manual command mode
+    //    else {
+    //      autoState = true;
+    //    }
     // Sometimes 0 values get stuck in buffer for some reason. This clears them out.
     if (tx == 0) {
       while (TxSerial.available()) {
@@ -784,6 +789,8 @@ void Debug(void) {
     TxSerial.println(cmd);
     TxSerial.print("last_cmd: ");
     TxSerial.println(last_cmd);
+    TxSerial.print("autoState: ");
+    TxSerial.println(autoState);
     TxSerial.print("dhtState: ");
     TxSerial.println(dhtState);
     TxSerial.print("dehumPinState: ");
