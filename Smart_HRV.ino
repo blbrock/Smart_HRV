@@ -1,3 +1,4 @@
+#include <RunningAverage.h>
 #include <SoftwareSerial.h>
 #include <avr/wdt.h>;
 /*
@@ -10,41 +11,42 @@
   both temp and humidity readings from that sensor.
 */
 #include <dht.h>
-#include <EEPROM.h>
+//#include <EEPROM.h>
 
 dht DHT;
 
-#define mBathPIN 4   // Master bath pin
-#define gBathPIN 5   // Guest bath pin
-#define refPIN 6   // Outside reference pin
+// Define input pins
+const int dehumPin = 2; // Dehumidification relay pin
+const int fanPin = 3; // Fresh air fan relay pin
+const int mBathPIN = 4;  // Master bath pin
+const int gBathPIN = 5;  // Guest bath pin
+const int refPIN = 6;  // Outside reference pin
+const int mediaRmPIN = 7; // Indoor reference in media room
 
 byte cmd = 4;
 byte last_cmd;
 int RxByte;
 bool autoState = true;
-const int dehumPin = 2;
 int dehumPinState = 0;
 int dhp = 1;
-const int fanPin = 3;
 int fanPinState = 0;
-// int fp = 1;
 int dhtState = 0;
 int minTempThresh = 5;
-//float setpointOn = 60;
-//float setpointOff = 55;
-//float humOn = setpointOn;
-//float humOff = setpointOff;
-//float hMin = setpointOff; // Intitialize minimum humidity that can be obtained
 float rft;
-//int humTarget = 55; // moved to local variable to free memory
 byte prehumcmd = 0;
 int debug = 0;
 String dataList = "";
+int samples = 0;
+
+RunningAverage mbhRA(10);
+RunningAverage gbhRA(10);
+RunningAverage mrhRA(10);
+RunningAverage rfhRA(10);
+RunningAverage rftRA(10);
 
 SoftwareSerial TxSerial(10, 11); // RX, TX
 
 void setup() {
-
   Serial.begin(300);
   TxSerial.begin(9600);
   TxSerial.println("Serial communication initialized");
@@ -60,6 +62,13 @@ void setup() {
   }
   // Convert rft to Fahrenheit
   rft = rft * 1.8 + 32;
+
+  // explicitly start clean
+  mbhRA.clear();
+  gbhRA.clear();
+  mrhRA.clear();
+  rfhRA.clear();
+  rftRA.clear();
 
   // Initialize startup handshake
   startup();
@@ -80,9 +89,9 @@ void loop() {
   // Get commands from HRV
   RxByte = read_Tx(); // Read any incoming signals from HRV unit
   // Capture unknown commands
-  if (RxByte != 0 and RxByte != 220 and RxByte != 255 and RxByte != 92 and RxByte != 28 and RxByte != 188) {
-    Capture();
-  }
+  //  if (RxByte != 0 and RxByte != 220 and RxByte != 255 and RxByte != 92 and RxByte != 28 and RxByte != 188) {
+  //    Capture();
+  //  }
 
   // Check relay pins for status of thermostat calls
   if (autoState) {
@@ -249,6 +258,7 @@ float CheckHumidity(void) {
 
   float mbh;
   float gbh;
+  float mrh;
   float rfh;
   //float rft;
   int humTarget;
@@ -261,22 +271,39 @@ float CheckHumidity(void) {
 
   int chk = DHT.read22(mBathPIN);
   if (chk == 0 ) {
-    mbh = DHT.humidity;
+    mbhRA.addValue(DHT.humidity);
+    mbh = mbhRA.getAverage();
   }
-
   chk = DHT.read22(gBathPIN);
   if (chk == 0) {
-    gbh = DHT.humidity;
+    gbhRA.addValue(DHT.humidity);
+    gbh = gbhRA.getAverage();
   }
-
+  chk = DHT.read22(mediaRmPIN);
+  if (chk == 0) {
+    mrhRA.addValue(DHT.humidity);
+    mrh = mrhRA.getAverage();
+  }
   chk = DHT.read21(refPIN);
   if (chk == 0 ) {
-    rfh = DHT.humidity;
+    rfhRA.addValue(DHT.humidity);
+    rfh = rfhRA.getAverage();
   }
-
-  rft = DHT.temperature;
+  rftRA.addValue(DHT.temperature);
+  rft = rftRA.getAverage();
+  //rft = DHT.temperature;
   // Convert rft to Fahrenheit
   rft = rft * 1.8 + 32;
+
+  samples++;
+  if (samples == 300)
+  {
+    samples = 0;
+    mbhRA.clear();
+    gbhRA.clear();
+    mrhRA.clear();
+    rfhRA.clear();
+  }
 
   float h = max(mbh, gbh);
 
@@ -290,9 +317,8 @@ float CheckHumidity(void) {
     dehumPinState = 0;
   }
 
-
-  // Calculate minimum humidity that can be achieved
-  float minRecirc = min(mbh, gbh) + 4;
+  // Calculate minimum humidity that can be achieved - set to mean indoor humidity + 2.5
+  float minRecirc = ((mbh + gbh + mrh) / 3) + 2.5;
   float minHum = min(rfh + 2, minRecirc);
 
   if (debug == 0) {
@@ -330,7 +356,7 @@ float CheckHumidity(void) {
       dehumCall = 0;
     }
     // Set HRV to recirculate if possible to conserve heat
-    if ((h < minRecirc and humOff < minRecirc) or (fanPinState == 1 and rft < minTempThresh) or (rfh <= humOff and rft >= 50)) {
+    if ((h < minRecirc and humOff < minRecirc) or (fanPinState == 1 and rft > minTempThresh) or (rfh <= humOff and rft >= 50)) {
       recirc = 0;
     }
     else {
@@ -347,18 +373,10 @@ float CheckHumidity(void) {
     }
     else prehumcmd = 236;
     if (recirc == 0) {
-
-      //    if (last_cmd != 0) {
-      //      prehumcmd = last_cmd;
-      //    }
-      //    else prehumcmd = 236;
-
       if (autoState) {
         cmd = 76;
         dhtState = 1;
       }
-
-
       if (debug >= 2) {
         TxSerial.println("High humidity detected!");
       }
@@ -372,11 +390,6 @@ float CheckHumidity(void) {
         dhtState = 1;
       }
     }
-
-    if (debug >= 2) {
-      TxSerial.print("h: ");
-      TxSerial.println(h);
-    }
   }
 
   else if (h <= humOff and dhtState == 1) {
@@ -389,16 +402,21 @@ float CheckHumidity(void) {
       TxSerial.println("Humidity call ended");
     }
   }
+
   if (debug >= 1) {
     TxSerial.print("Outside TEMP: ");
     TxSerial.println(rft);
     TxSerial.print("Outside RH: ");
     TxSerial.println(rfh);
+    TxSerial.print("Inside Ref RH: ");
+    TxSerial.println(mrh);
     TxSerial.print("Master Bath RH: ");
     TxSerial.println(mbh);
     TxSerial.print("Guest Bath RH: ");
     TxSerial.println(gbh);
     if (debug >= 2) {
+      TxSerial.print("h: ");
+      TxSerial.println(h);
       TxSerial.print("humTarget: ");
       TxSerial.println(humTarget);
       TxSerial.print("humOn: ");
@@ -443,7 +461,6 @@ void CheckRelays(float rft) {
       }
     }
   }
-
   if (fp == 1 and dhp == 1) digitalWrite(13, LOW);
   if (debug >= 4) {
     TxSerial.println("End Check Relay");
@@ -484,7 +501,6 @@ void ExecCmds() {
     if (cmd > 5) {
       write_Tx(cmd);
     }
-
     ///// Execute HRV Requests /////
     // Auto, Off, Recirculate Modes
     if (cmd == 12 or cmd == 172 or cmd == 236) {
@@ -503,21 +519,18 @@ void ExecCmds() {
     else if (RxByte == 220 || RxByte == 28) {
       Ak();
     }
-
     // Enter debug mode
     else if (cmd <= 4) {
       if (cmd != 0) debug = cmd;
       else debug = 0;
       if (cmd >= 3)Debug();
     }
-
     else {
       TxSerial.println("Sending Manual Command");
       write_Tx(cmd);
       cmd = 0;
     }
   }
-
   // Repeat Command Handler
   else if (cmd != 0) {
     if (debug == 1) {
@@ -527,7 +540,6 @@ void ExecCmds() {
     while (Serial.read() >= 0); // flush the receive buffer
     cmd = 0;
   }
-
 }
 /////////////////////////////////////// Manual Command Mode ///////////////////////////////////////
 /* Get commands from TxSerial monitor and send as digital byte
@@ -546,9 +558,9 @@ void ManCmd() {
       TxSerial.print("Debug Level - ");
       TxSerial.println(debug);
     }
-    else if (tx == 5) {
-      ClearEeprom();
-    }
+    //    else if (tx == 5) {
+    //      ClearEeprom();
+    //    }
     else if (tx > 5) {
       cmd = tx; // Send manual command
       // Enter manual command mode
@@ -659,6 +671,7 @@ void Xchange(void) {
 
 ////////////////////////////////// 30-Minute Timer Function /////////////////////////////////
 void Timer(void) {
+  autoState = false;
   wdt_reset();
   write_Tx(188);
   if (debug >= 4) {
@@ -693,8 +706,6 @@ void StopTimer(void) {
   write_Tx(252);
   for (int times = 0; times < 10; times++) {
     wdt_reset();
-
-
     RxByte = read_Tx();
     if (RxByte != 28) {
       if (debug >= 4) {
@@ -723,7 +734,7 @@ void StopTimer(void) {
       break;
     }
   }
-
+  autoState = true;
   cmd = last_cmd; // return HRV to previous state (also puts HRV in listening mode)
   last_cmd = 0; // make sure command is not ignored as repeat
 }
@@ -742,43 +753,43 @@ void Ak(void) {
 ///////////////////////////////// Capture EEPROM //////////////////////////////////////////
 /* Capture unrecognized commands to eeprom to try to find command sequence for maintenance required indicator */
 
-void Capture(void) {
-  for (int address = 0 ; address < EEPROM.length() ; address++) {
-    wdt_reset();
-    byte val = EEPROM.read(address);
-    if (val == RxByte) {
-      break;
-    }
-    else if (val == 0) {
-      EEPROM.write(address, RxByte);
-      break;
-      if (debug > 2) {
-        TxSerial.print("!!!!!!!!!!!!!!!- Unknown Command: ");
-        TxSerial.print(RxByte);
-        TxSerial.println(" -!!!!!!!!!!!!!!!");
-      }
-    }
-    write_Tx(188);
-  }
-}
+//void Capture(void) {
+//  for (int address = 0 ; address < EEPROM.length() ; address++) {
+//    wdt_reset();
+//    byte val = EEPROM.read(address);
+//    if (val == RxByte) {
+//      break;
+//    }
+////    else if (val == 0) {
+////      EEPROM.write(address, RxByte);
+////      break;
+////      if (debug > 2) {
+////        TxSerial.print("!!!!!!!!!!!!!!!- Unknown Command: ");
+////        TxSerial.print(RxByte);
+////        TxSerial.println(" -!!!!!!!!!!!!!!!");
+////      }
+////    }
+//    write_Tx(188);
+//  }
+//}
 
 ///////////////////////////////// Capture EEPROM //////////////////////////////////////////
 /* Capture unrecognized commands to eeprom to try to find command sequence for maintenance required indicator */
 
-void readEEPROM(void) {
-  TxSerial.println("%%%%%%%%%%%%%%%%% EEPROM Values %%%%%%%%%%%%%%%%%");
-  for (int address = 0 ; address < EEPROM.length() ; address++) {
-    wdt_reset();
-    byte val = EEPROM.read(address);
-    if (val > 0 and val < 255) {
-      TxSerial.println(val);
-    }
-    else if (val == 0) {
-      break;
-    }
-  }
-  TxSerial.println("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%");
-}
+//void readEEPROM(void) {
+//  TxSerial.println("%%%%%%%%%%%%%%%%% EEPROM Values %%%%%%%%%%%%%%%%%");
+//  for (int address = 0 ; address < EEPROM.length() ; address++) {
+//    wdt_reset();
+//    byte val = EEPROM.read(address);
+//    if (val > 0 and val < 255) {
+//      TxSerial.println(val);
+//    }
+//    else if (val == 0) {
+//      break;
+//    }
+//  }
+//  TxSerial.println("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%");
+//}
 ///////////////////////////////// Enter Debug to turn print messages on ///////////////////////
 void Debug(void) {
   if (debug >= 3) {
@@ -808,33 +819,33 @@ void Debug(void) {
     TxSerial.print("prehumcmd: ");
     TxSerial.println(prehumcmd);
     TxSerial.println("########################################");
-    if (debug > 3) {
-      readEEPROM();
-    }
+    //    if (debug > 3) {
+    //      readEEPROM();
+    //    }
   }
   //cmd = 0;
 }
 
 //////////////////////////////////////////////////// Clear Eeprom /////////////////////////////////////////////
-void ClearEeprom() {
-  /***
-    Iterate through each byte of the EEPROM storage.
-
-    Larger AVR processors have larger EEPROM sizes, E.g:
-    - Arduno Duemilanove: 512b EEPROM storage.
-    - Arduino Uno:        1kb EEPROM storage.
-    - Arduino Mega:       4kb EEPROM storage.
-
-    Rather than hard-coding the length, you should use the pre-provided length function.
-    This will make your code portable to all AVR processors.
-  ***/
-  TxSerial.print("Clearing EEPROM storage...");
-  for (int i = 0 ; i < EEPROM.length() ; i++) {
-    EEPROM.write(i, 0);
-    wdt_reset();
-  }
-  TxSerial.print("Clear EEPROM completed!");
-}
+//void ClearEeprom() {
+//  /***
+//    Iterate through each byte of the EEPROM storage.
+//
+//    Larger AVR processors have larger EEPROM sizes, E.g:
+//    - Arduno Duemilanove: 512b EEPROM storage.
+//    - Arduino Uno:        1kb EEPROM storage.
+//    - Arduino Mega:       4kb EEPROM storage.
+//
+//    Rather than hard-coding the length, you should use the pre-provided length function.
+//    This will make your code portable to all AVR processors.
+//  ***/
+//  TxSerial.print("Clearing EEPROM storage...");
+//  for (int i = 0 ; i < EEPROM.length() ; i++) {
+//    EEPROM.write(i, 0);
+//    wdt_reset();
+//  }
+//  TxSerial.print("Clear EEPROM completed!");
+//}
 
 /////////////////////////////////////////// Interactive Mode for Debugging Only //////////////////////////////
 void interactive() {
