@@ -42,6 +42,10 @@ After years of frustration and some band-aid fixes for these inadequate controls
   
 # Error checking and logging:   
 
+# Known Bugs:
+
+- The HRV unit may enter an error condition if someone manually presses a ventilation button in a bathroom while an automated dehumidification cycle is already in progress.  This appears to be due to some internal control logic within the HRV.  My work around is to power cycle the HRV unit if that happens to reset the error condition.  A better solution would be to wire the manual ventilation buttons directly to the arduino control panel and modify the control panel schematic and arduino sketch to bypass the internal HRV controller for handling manual ventilation requests.
+
   
   
    
