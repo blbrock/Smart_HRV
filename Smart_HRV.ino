@@ -1,14 +1,15 @@
+\
 #include <RunningAverage.h>
 #include <SoftwareSerial.h>
-#include <avr/wdt.h>;
+// #include <avr/wdt.h>;
 /*
   Switched to DHT library developed by Rob Tillaart
   (https://github.com/RobTillaart/Arduino/tree/master/libraries/DHTlib)
   This library reads both temperature and humidity from
-  a sensor with a single poll.  This will hopefully solve a
-  problem with the outdoor reference sensor hanging after several hours of use.
-  This hanging appears to be caused by timing issues with double polling to extract
-  both temp and humidity readings from that sensor.
+  a sensor with a single poll.  This solved a problem with the outdoor reference
+  sensor hanging after several hours of use. This hanging appears to be caused by
+  timing issues with float polling to extract both temp and humidity readings from
+  that sensor.
 */
 #include <dht.h>
 //#include <EEPROM.h>
@@ -27,77 +28,75 @@ byte cmd = 4;
 byte last_cmd;
 int RxByte;
 bool autoState = true;
-int dehumPinState = 0;
-int dhp = 1;
-int fanPinState = 0;
-int dhtState = 0;
+bool recircState = true;
+bool fanOn = false;
+bool dehumCall = false;
+bool defrost = false;
 int minTempThresh = 5;
 float rft;
-byte prehumcmd = 0;
 int debug = 0;
 String dataList = "";
 int samples = 0;
+unsigned long startTime = 0;
+unsigned long dhStartTime = 0;
 
-RunningAverage mbhRA(10);
-RunningAverage gbhRA(10);
-RunningAverage mrhRA(10);
-RunningAverage rfhRA(10);
-RunningAverage rftRA(10);
+RunningAverage mbhRA(5);
+RunningAverage gbhRA(5);
+RunningAverage mrhRA(5);
+RunningAverage mbtRA(5);
+RunningAverage gbtRA(5);
+RunningAverage mrtRA(5);
+RunningAverage rfhRA(5);
+RunningAverage rftRA(5);
 
 SoftwareSerial TxSerial(10, 11); // RX, TX
 
 void setup() {
   Serial.begin(300);
   TxSerial.begin(9600);
-  TxSerial.println("Serial communication initialized");
+  //  TxSerial.println("Serial communication initialized");
 
   pinMode(13, OUTPUT);
   digitalWrite(13, LOW);    // turn the LED off by making the voltage LOW to save a little energy
   pinMode(dehumPin, INPUT_PULLUP);
   pinMode(fanPin, INPUT_PULLUP);
 
-  int chk = DHT.read21(refPIN);
-  if (chk == 0 ) {
-    rft = DHT.temperature;
-  }
-  // Convert rft to Fahrenheit
-  rft = rft * 1.8 + 32;
-
   // explicitly start clean
   mbhRA.clear();
   gbhRA.clear();
   mrhRA.clear();
+  mbtRA.clear();
+  gbtRA.clear();
+  mrtRA.clear();
   rfhRA.clear();
   rftRA.clear();
 
+  int dhp = HIGH;
+  int chk = DHT.read21(refPIN);
+  if (chk == 0 ) {
+    //rftCelsius = DHT.temperature;
+    // Convert rft to Fahrenheit
+    rft = round (rft * 1.8 + 32);
+  }
+
   // Initialize startup handshake
   startup();
-  cmd = 0; //Reset cmd and last_cmd after startup
-  last_cmd = 0;
-  wdt_enable(WDTO_8S);
+  cmd = 236; //Reset cmd and last_cmd after startup
+  last_cmd = 236;
+  // wdt_enable(WDTO_8S);
 }
 
 void loop() {
-  if (debug >= 4) {
-    TxSerial.print("Start Loop, cmd = ");
-    TxSerial.println(cmd);
-    TxSerial.print("last_cmd: ");
-    TxSerial.println(last_cmd);
-  }
-  dataList = "";
-  wdt_reset();
+  //dataList = "";
+  if (recircState) defrost = false;
+  // wdt_reset();
   // Get commands from HRV
   RxByte = read_Tx(); // Read any incoming signals from HRV unit
-  // Capture unknown commands
-  //  if (RxByte != 0 and RxByte != 220 and RxByte != 255 and RxByte != 92 and RxByte != 28 and RxByte != 188) {
-  //    Capture();
-  //  }
 
   // Check relay pins for status of thermostat calls
   if (autoState) {
     CheckRelays(rft);
-    // }
-    SetRelays();
+    //    SetRelays();
   }
 
   // Humidity sensors take precedent over relays or HRV/Timer commands
@@ -112,21 +111,20 @@ void loop() {
   ExecCmds();
 
   delay(2000);
-  if (cmd <= 4) {
+  if (debug >= 3) {
     Debug();
     delay(2000);
   }
   // Send data to android via bluetooth
   if (debug == 0) {
-    dataList = dataList + String(last_cmd) + ',';
+    dataList = dataList + String(last_cmd) + ',' + String(defrost) + ',';
     TxSerial.println(dataList);
+    dataList = "";
   }
   Serial.flush(); // flush any bytes remainining in sending buffer
 
   // If manual mode lasts > 4 hours, return to automatic mode
   if (!autoState) {
-    unsigned long startTime = 0;
-    startTime = millis();
     if (millis() - startTime > 14400000) {
       cmd = 236;
       autoState = true;
@@ -144,7 +142,7 @@ byte read_Tx() {
   delay(100); // Wait to allow time to receive signal time delay value seems critical
   if (Serial.available() > 0) {
     RxByte = Serial.read();
-    if (debug > 0) {
+    if (debug >= 1) {
       TxSerial.print("Rx: ");
       TxSerial.println(RxByte, DEC);
     }
@@ -155,7 +153,7 @@ byte read_Tx() {
 // Write Serial communications
 void write_Tx(byte cmd) {
   Serial.write(cmd);
-  if (debug > 0) {
+  if (debug >= 1) {
     TxSerial.print("Tx: ");
     TxSerial.println(cmd);
   }
@@ -166,7 +164,7 @@ void startup() {
   //Startup Handshake
   for (int times = 0; times < 3; times++) {
     delay(200);
-    TxSerial.println("Startup waiting for 28...");
+    //    TxSerial.println("Startup waiting for 28...");
     RxByte = read_Tx();
     if (RxByte == 28) {
       break;
@@ -208,7 +206,7 @@ void startup() {
     for (int times = 0; times < 10; times++) {
       RxByte = read_Tx();
       if (RxByte != 28) {
-        TxSerial.println("Waiting for 28...");
+        //        TxSerial.println("Waiting for 28...");
         RxByte = read_Tx();
         delay(200);
       }
@@ -220,7 +218,7 @@ void startup() {
     for (int times = 0; times < 10; times++) {
       RxByte = read_Tx();
       if (RxByte != 220) {
-        TxSerial.println("Waiting for 220...");
+        //        TxSerial.println("Waiting for 220...");
         RxByte = read_Tx();
         delay(200);
       }
@@ -259,151 +257,166 @@ float CheckHumidity(void) {
   float mbh;
   float gbh;
   float mrh;
+  int dhp;
+  float mbt;
+  float gbt;
+  float mrt;
+  float rftCelsius;
   float rfh;
-  //float rft;
-  int humTarget;
+  float humTarget;
   float humOn; // = setpointOn;
   float humOff; // = setpointOff;
-  float hMin; // = setpointOff;
-  int dehumCall;
   int recirc;
 
-
+  // wdt_reset();
+  // Get data from sensors. Use running averages
   int chk = DHT.read22(mBathPIN);
   if (chk == 0 ) {
     mbhRA.addValue(DHT.humidity);
     mbh = mbhRA.getAverage();
+    mbtRA.addValue(DHT.temperature);
+    mbt = mbtRA.getAverage();
   }
   chk = DHT.read22(gBathPIN);
   if (chk == 0) {
     gbhRA.addValue(DHT.humidity);
     gbh = gbhRA.getAverage();
+    gbtRA.addValue(DHT.temperature);
+    gbt = gbtRA.getAverage();
   }
+  // wdt_reset();
   chk = DHT.read22(mediaRmPIN);
   if (chk == 0) {
     mrhRA.addValue(DHT.humidity);
     mrh = mrhRA.getAverage();
+    mrtRA.addValue(DHT.temperature);
+    mrt = mrtRA.getAverage();
   }
   chk = DHT.read21(refPIN);
   if (chk == 0 ) {
     rfhRA.addValue(DHT.humidity);
     rfh = rfhRA.getAverage();
+    rftRA.addValue(DHT.temperature);
+    rftCelsius = rftRA.getAverage();
+    //rftCelsius = DHT.temperature;
+    // Convert rft to Fahrenheit
+    rft = round(rftCelsius * 1.8 + 32);
   }
-  rftRA.addValue(DHT.temperature);
-  rft = rftRA.getAverage();
-  //rft = DHT.temperature;
-  // Convert rft to Fahrenheit
-  rft = rft * 1.8 + 32;
 
+  // wdt_reset();
   samples++;
-  if (samples == 300)
+  if (samples == 100)
   {
     samples = 0;
     mbhRA.clear();
     gbhRA.clear();
     mrhRA.clear();
+    mbtRA.clear();
+    gbtRA.clear();
+    mrtRA.clear();
     rfhRA.clear();
+    rftRA.clear();
   }
 
-  float h = max(mbh, gbh);
+  /* Convert indoor and outdoor relative humidity to absolute humidity to allow comparison of
+      water holding capacity for setting humidity on/off setpoints.
+  */
+  float tempIndoor = (mbt + gbt + mrt) / 3;
+  float hMax = max(mbh, max(gbh, mrh)); // highest indoor sensor
+  float hMin = min(mbh, min(gbh, mrh));
+  float hAvg = ((mbh + gbh + mrh) - hMax) / 2; // = average of 2 lowest indoor sensors
+  float h;
+  // Use maximum humidity only when humidity is raised in bathrooms (e.g. shower), otherwise use average
+  if (hMax - hMin > 10) h = hMax;
+  else  h = hAvg;
+  h = calcAbsH(tempIndoor, h);
+  float Absh = calcAbsH(tempIndoor, h);
+  float AbsHumIndoor = calcAbsH(tempIndoor, hAvg);
+  float AbsHumOutdoor = calcAbsH(rftCelsius, rfh);
+  float minRecirc = AbsHumIndoor * 1.2;
 
-  // Check dehumidity relay to see if Nest is calling for dehumidification
-  dhp = digitalRead(dehumPin);
-  if (dhp == 0 and h > humOff) {
-    digitalWrite(13, HIGH);
-    dehumPinState = 1;
-  }
-  else {
-    dehumPinState = 0;
-  }
-
-  // Calculate minimum humidity that can be achieved - set to mean indoor humidity + 2.5
-  float minRecirc = ((mbh + gbh + mrh) / 3) + 2.5;
-  float minHum = min(rfh + 2, minRecirc);
+  /*
+        Calculate minimum humidity that can be achieved - indoor humidity calculated as the average
+        humidity of the two lowest reading sensors. Minimum achievable recirculating humidity is
+        absolute indoor humidity times 1.2. Minimum humidity achievable is minimum of minRecirc and absolute
+        outdoor humidity time 2.1. Multipliers are arbitrary values designed to avoid setting humidity off setpoints
+        that are unrealistically low, which results in continuous running of HRV without affecting humidity.
+  */
+  float minHum = min(AbsHumOutdoor * 2.1, minRecirc);
+  //float minHum = min(rfhAdj + 2, minRecirc);
 
   if (debug == 0) {
     dataList = String(rft) + ',' + String(int(round(rfh))) + ',' + String(int(round(mbh))) + ',' + String(int(round(gbh))) + ',';
   }
 
   // Set target humidity based on outside temperature
-  if (isnan(rfh) == false) {
-    if (isnan(rft) == false) {
-      humTarget = float(((0.55 * rft) + 31) - 2.5);
-    }
 
-    // Set max humidity to 60% if possible
-    if (humTarget > 60 and minHum < 60) {
-      humTarget = 60;
-    }
-    /* if minimum achievable humidity is > humTarget, adjust humidity setpoints
-      to minimum humidity possible */
-    if (humTarget < minHum) {
-      humOff = minHum;
-      humOn = minHum + 5;
-    }
+    humTarget = float(((0.56 * rft) + 32) - 2.5);
+ // humTarget = float(((0.4603 * rft) + 32) - 2.5);
 
-    // Shut off HRV when humidity drops to target or minimum achievable humidity
-    else {
-      humOff = humTarget;
-    }
-    humOn = humOff + 5;
+  // Set max humidity to 60% if possible
+  if (humTarget > 60 and minHum < 60) humTarget = 60;
+  // set min humidity to avoid running fresh air exchange during extreme cold
+  else if (humTarget < 26) humTarget = 26;
 
-    // Set dehumidication call on/off
-    if (h >= humOn or (dhp == 0 and h > humOff + 2)) {
-      dehumCall = 1;
-    }
-    else {
-      dehumCall = 0;
-    }
-    // Set HRV to recirculate if possible to conserve heat
-    if ((h < minRecirc and humOff < minRecirc) or (fanPinState == 1 and rft > minTempThresh) or (rfh <= humOff and rft >= 50)) {
-      recirc = 0;
-    }
-    else {
-      recirc = 1;
-      if (debug >= 2 and last_cmd == 172) {
-        TxSerial.println("Running in recirculation mode.");
-      }
-    }
-  }
-  // Start dehumidification if humidity is > than target setpoint or Nest is calling for dehumidify
-  if (dehumCall == 1) {
-    if (last_cmd != 0 and last_cmd != 76 and last_cmd != 172) {
-      prehumcmd = last_cmd;
-    }
-    else prehumcmd = 236;
-    if (recirc == 0) {
-      if (autoState) {
-        cmd = 76;
-        dhtState = 1;
-      }
-      if (debug >= 2) {
-        TxSerial.println("High humidity detected!");
-      }
-    }
-    /* Remove as much humidity in recirculation mode
-       as possible to conserve heat.
-    */
-    else if (recirc == 1) {
-      if (autoState) {
-        cmd = 172;
-        dhtState = 1;
-      }
-    }
+  float AbsHumTarget = calcAbsH(tempIndoor, humTarget);
+
+  /* if minimum achievable humidity is > humTarget, adjust humidity setpoints
+    to minimum humidity possible */
+  if (AbsHumTarget < minHum) {
+    humOff = minHum;
   }
 
-  else if (h <= humOff and dhtState == 1) {
-    if (autoState) {
-      if (prehumcmd == 76 or prehumcmd == 172) cmd = 236;
-      else cmd = prehumcmd;
-      dhtState = 0;
-    }
-    if (debug >= 4) {
-      TxSerial.println("Humidity call ended");
-    }
+  // Shut off HRV when humidity drops to target or minimum achievable humidity
+  else {
+    humOff = AbsHumTarget;
   }
 
-  if (debug >= 1) {
+  /* If it's really cold outside, adjust humOff upward slightly to prevent continuous
+    run without achieving humidity shutoff.
+  */
+  if (rft < minTempThresh) humOff = humOff * 1.25;
+
+  humOn = humOff + 1;
+
+
+  // Check dehumidity relay to see if Nest is calling for dehumidification
+  dhp = digitalRead(dehumPin);
+  if (dhp == LOW) {
+    digitalWrite(13, HIGH);
+  }
+  // Set dehumidication call on/off. Start/check timer to run dh call minimum of 15 minutes to prevent short cycling.
+  if (h >= humOn or (dhp == LOW and h > minHum)) {
+    dehumCall = true;
+    if (dhStartTime == 0) dhStartTime = millis();
+  }
+  else if (millis() - dhStartTime > 900000 and (h <= humOff and (dhp == HIGH) or (dhp == LOW and minHum > h + 0.5))) {
+    dehumCall = false;
+    recircState = true;
+    dhStartTime = 0;
+  }
+
+  // Set HRV to recirculate if possible to conserve heat
+  if ((h <= minRecirc) or (calcAbsH(tempIndoor, hAvg) > humOff) or (fanOn and rft > minTempThresh) or (AbsHumOutdoor <= humOff and rft >= 50)) {
+    recircState = false;
+  }
+  else if (h > minRecirc + 1) { // or rft < minTempThresh) {
+    recircState = true;
+  }
+
+  if (autoState) {
+    //    Start dehumidification if humidity is > than target setpoint or Nest is calling for dehumidify
+    if (dehumCall) {
+
+      if (recircState) cmd = 172;
+      else cmd = 76;
+    }
+    else {
+      if (fanOn and rft > minTempThresh) cmd = 140;
+      else cmd = 236;
+    }
+  }
+  if (debug >= 2) {
     TxSerial.print("Outside TEMP: ");
     TxSerial.println(rft);
     TxSerial.print("Outside RH: ");
@@ -414,21 +427,33 @@ float CheckHumidity(void) {
     TxSerial.println(mbh);
     TxSerial.print("Guest Bath RH: ");
     TxSerial.println(gbh);
-    if (debug >= 2) {
+    TxSerial.print("humTarget: ");
+    TxSerial.println(humTarget);
+
+
+    if (debug >= 3) {
+      TxSerial.println();
       TxSerial.print("h: ");
       TxSerial.println(h);
-      TxSerial.print("humTarget: ");
-      TxSerial.println(humTarget);
       TxSerial.print("humOn: ");
       TxSerial.println(humOn);
       TxSerial.print("humOff: ");
       TxSerial.println(humOff);
+      TxSerial.print("minRecirc: ");
+      TxSerial.println(calcRelH(tempIndoor, minRecirc));
+      TxSerial.print("AbsHumOutdoor: ");
+      TxSerial.println(AbsHumOutdoor);
+      TxSerial.print("AbsHumTarget: ");
+      TxSerial.println(AbsHumTarget);
+
       if (debug >= 4) {
-        TxSerial.println("End Check Humidity");
-        TxSerial.print("cmd: ");
-        TxSerial.println(cmd);
+        TxSerial.println();
+        TxSerial.println();
+        TxSerial.print("Dehum Relay: ");
+        TxSerial.println(dhp);
       }
     }
+
   }
   return rft;
 }
@@ -436,120 +461,96 @@ float CheckHumidity(void) {
 ///////////////////////////////// Check Relay Pins for Input Commands ////////////////////////////
 
 void CheckRelays(float rft) {
-  wdt_reset();
-  if (debug >= 4) {
-    TxSerial.println("Checking Relay Status...");
-    TxSerial.print("last_cmd: ");
-    TxSerial.println(last_cmd);
-    TxSerial.print("cmd: ");
-    TxSerial.println(cmd);
-  }
   int fp = digitalRead(fanPin);
-  dhp = digitalRead(dehumPin);
+  int dhp = digitalRead(dehumPin);
 
-  if ( fp == 0) {
-    if (rft > minTempThresh) { // don't initiate fresh air exchange if outside temp is too cold
-      if (dhtState == 0) { // CheckHumidity() will handle fresh air call if dehumidification in progress
-        cmd = 140;
-      }
+  // Don't initiate fresh air exchange if outside temp is too cold
+  // CheckHumidity() will handle fresh air call if dehumidification in progress
+  if (fp == LOW) {
+    fanOn = true;
+    if (rft > minTempThresh and !dehumCall) {
+      cmd = 140;
       digitalWrite(13, HIGH);
-      fanPinState = 1;
-    }
-    else {
-      if (debug >= 2) {
-        TxSerial.println ("Cold temperature lockout engaged");
-      }
     }
   }
-  if (fp == 1 and dhp == 1) digitalWrite(13, LOW);
-  if (debug >= 4) {
-    TxSerial.println("End Check Relay");
-    TxSerial.print("cmd: ");
-    TxSerial.println(cmd);
-  }
-}
-
-///////////////////////////////// Set Relays to Appropriate State //////////////////////////////////////
-void SetRelays() {
-  int fp = digitalRead(fanPin);
-  wdt_reset();
-  if (fanPinState == 1 and fp == 1) {
-    if (debug >= 4) {
-      TxSerial.println("Starting fan shutdown sequence...");
-      TxSerial.print("Fan Pin: ");
-      TxSerial.println(fp);
-      TxSerial.print("last_cmd: ");
-      TxSerial.println(last_cmd);
-    }
-    if (last_cmd != 140 and last_cmd != 0) {
-      cmd = last_cmd;
-    }
-    else {
+  else if (fanOn and fp == HIGH) {
+    digitalWrite(13, LOW);
+    fanOn = false;
+    if (!dehumCall) {
       cmd = 236;
     }
-    digitalWrite(13, LOW);
-    fanPinState = 0;
   }
+  if (fp == HIGH and dhp == HIGH) digitalWrite(13, LOW);
 }
 
 /////////////////////////// Execute Commands ///////////////////////////
 void ExecCmds() {
-  if (cmd == 236) autoState = true;
+  if (debug >= 1) {
+  }
   // Don't send command if it is is zero or a repeat of last command sent
-  if ((cmd != 0 and cmd != last_cmd) or (RxByte == 92 or RxByte == 220 or cmd == 236)) {
-
-    if (cmd > 5) {
+  if ((cmd != 255 and cmd != last_cmd) or (RxByte == 92 or RxByte == 220 or RxByte == 236)) {
+    // if (cmd == 255) cmd = 236;
+    ///// Execute HRV Requests /////
+    if (cmd > 5 ) {
       write_Tx(cmd);
     }
-    ///// Execute HRV Requests /////
+    // 20-Minute Timer
+    if (RxByte == 92) {
+      /* send Ak if defrost signal (92) received. I've found no way
+          to tell the difference between 92 sent from pressing a wall switch
+          and one sent to signal defrost. The partial solution is to assume
+          that 92 sent during dehumidification is a defrost call. A defrost call
+          low speed fresh air exchange could be misinterpreted as a wall switch
+          push and initiate high speed exchange timer.
+
+      */
+      if (dehumCall or last_cmd == 76 or last_cmd == 140) {
+        Ak();
+        if (defrost) {
+          defrost = false;
+          if (cmd = 76) last_cmd = 76;
+        }
+        else {
+          defrost = true;
+          last_cmd = 172;
+        }
+      }
+      else  Timer();
+      last_cmd = cmd;
+    }
+    // Acknowledge Keep Alive Request
+    else if (RxByte > 0 and RxByte < 255) {
+      // else if (RxByte == 220 or RxByte == 28 or RxByte == 92) {
+      Ak();
+    }
     // Auto, Off, Recirculate Modes
-    if (cmd == 12 or cmd == 172 or cmd == 236) {
+    else if (cmd == 12 or cmd == 172 or cmd == 236) {
+      last_cmd = cmd;
+      defrost = 0;
+
       AutoOffRecirc();
     }
     // High, Low Fresh Air Exchange Modes
-
     else if (cmd == 76 or cmd == 140) {
+      last_cmd = cmd;
       Xchange();
     }
-    // 30-Minute Timer
-    else if (RxByte == 92) {
-      Timer();
-    }
-    // Acknowledge Keep Alive Request
-    else if (RxByte == 220 || RxByte == 28) {
-      Ak();
-    }
-    // Enter debug mode
-    else if (cmd <= 4) {
-      if (cmd != 0) debug = cmd;
-      else debug = 0;
-      if (cmd >= 3)Debug();
-    }
     else {
-      TxSerial.println("Sending Manual Command");
+      TxSerial.println("Man Cmd");
       write_Tx(cmd);
-      cmd = 0;
     }
   }
-  // Repeat Command Handler
-  else if (cmd != 0) {
-    if (debug == 1) {
-      TxSerial.println("Ignoring Repeat Command");
-    }
-    while (TxSerial.read() >= 0); // flush the receive buffer
-    while (Serial.read() >= 0); // flush the receive buffer
-    cmd = 0;
-  }
+
+  while (TxSerial.read() >= 0); // flush the receive buffer
+  while (Serial.read() >= 0); // flush the receive buffer
 }
+
 /////////////////////////////////////// Manual Command Mode ///////////////////////////////////////
 /* Get commands from TxSerial monitor and send as digital byte
   to HRV. Note that placement of TxSerial read here allows manual commands to
   override any programatic commands set earlier in the loop */
 
 void ManCmd() {
-  if (debug >= 4) {
-    TxSerial.println("Listening for command");
-  }
   if (TxSerial.available()) {
     byte tx = TxSerial.parseInt();
     // Set Debug level if it has changed
@@ -558,45 +559,41 @@ void ManCmd() {
       TxSerial.print("Debug Level - ");
       TxSerial.println(debug);
     }
-    //    else if (tx == 5) {
-    //      ClearEeprom();
-    //    }
-    else if (tx > 5) {
+    else if (tx > 5 and tx < 255) {
       cmd = tx; // Send manual command
       // Enter manual command mode
-      if (cmd != 236) autoState = false;
-    }
-    // Exit manual command mode
-    //    else {
-    //      autoState = true;
-    //    }
-    // Sometimes 0 values get stuck in buffer for some reason. This clears them out.
-    if (tx == 0) {
-      while (TxSerial.available()) {
-        TxSerial.read();
+      if (autoState) {
+        if (cmd == 236 and last_cmd == 236) ; // Don't toggle autoState on repeat off command
+        else  {
+          autoState = false;
+          startTime = millis();
+        }
       }
+      else if (cmd == 236) autoState = true;
+    }
+
+    // Sometimes 0 values get stuck in buffer for some reason. This clears them out.
+    while (TxSerial.available()) {
+      TxSerial.read();
     }
   }
 }
 
-
 /////////////////// Auto, Off and Recirculate Modes ////////////////////
 void AutoOffRecirc(void) {
-  wdt_reset();
-  if (debug >= 4) {
-    TxSerial.println("Running AutoOffRecirc...");
-  }
+  // wdt_reset();
   // Wait for acknowledgement that command was received. If not, repeat command up to 3 times
   for (int times = 0; times < 3; times++) {
     delay(200);
-    if (RxByte = read_Tx() != 188) {
+    RxByte = read_Tx();
+    if (RxByte != 188 and RxByte != 92) {
       write_Tx(cmd);
     }
     else {
       break;
     }
   }
-  wdt_reset();
+  // wdt_reset();
   for (int times = 0; times < 6; times++) {
     RxByte = read_Tx();
     if (RxByte != 220) {
@@ -609,29 +606,22 @@ void AutoOffRecirc(void) {
       break;
     }
   }
-  last_cmd = cmd;
-  cmd = 0;
   Serial.flush();
 }
 
 /////////////////////////////////// Fresh Aire Exchange Modes /////////////////////////////////////
 void Xchange(void) {
-  wdt_reset();
-  if (debug >= 4) {
-    TxSerial.println("Running Xchange...");
-  }
   // Wait for acknowledgement that command was received. If not, repeat command up to 3 times
   for (int times = 0; times < 3; times++) {
     delay(200);
     RxByte = read_Tx();
-    if (RxByte != 188) {
+    if (RxByte != 188 and RxByte != 92) {
       write_Tx(cmd);
     }
     else if (RxByte == 188) {
       break;
     }
   }
-  wdt_reset();
   for (int times = 0; times < 10; times++) {
     RxByte = read_Tx();
     if (RxByte != 92) {
@@ -645,72 +635,72 @@ void Xchange(void) {
       break;
     }
     else {
-      if (debug >= 4) {
-        TxSerial.println("Error! Communication not received");
-      }
       RxByte = 0;
     }
   }
-  wdt_reset();
-  // Cleanup params for next loop
-  if (cmd == 76 and dehumPinState == HIGH and last_cmd != 0 and last_cmd != 236) {
-    if (debug >= 4) {
-      TxSerial.print("Keeping last_cmd at ");
-      TxSerial.println(last_cmd);
-    }
-  }
-  else {
-    last_cmd = cmd;
-    if (debug >= 4) {
-      TxSerial.print("Setting last_cmd to ");
-      TxSerial.println(last_cmd);
-    }
-  }
-  cmd = 0;
 }
 
 ////////////////////////////////// 30-Minute Timer Function /////////////////////////////////
 void Timer(void) {
   autoState = false;
-  wdt_reset();
+  startTime = millis();
+  byte Tx;
+  int times = 0;
+  // wdt_reset();
   write_Tx(188);
-  if (debug >= 4) {
-    TxSerial.println("Starting 30 min timer");
-  }
-  //30 min = 180000 ms
-  for (int times = 0; times < 1800; times++) { //runs 200 times
-    wdt_reset();
+  //  if (debug >= 1) {
+  //    TxSerial.println("Starting 30 min timer");
+  //  }
+  //30 min = 1800000 ms
+  //20 min = 1200000 ms
+  while (millis() - startTime < 1200000) {
     // Report data via bluetooth while timer running
-    if (debug == 0) {
-      CheckHumidity();
-      dataList = dataList + String(92) + ',';
-      TxSerial.println(dataList);
-    }
+
+    CheckHumidity();
+    dataList = dataList + String(92) + ',' + String(defrost) + ',';
+    TxSerial.println(dataList);
+    dataList = ""; // clear old data list
+
     RxByte = read_Tx();
-    if (TxSerial.parseInt() == 220 || RxByte == 220 || RxByte == 255 || (times > 0 && RxByte == 92)) { // if wall switched pushed again, cancel timer
-      if (debug >= 4) {
-        TxSerial.println("Timer Cancel Request Recieved");
-      }
-      // write_Tx(188);
+    if (TxSerial.available()) {
+      Tx = TxSerial.parseInt();
+    }
+    if (Tx != debug and Tx <= 4) {
+      debug = Tx;
+      TxSerial.print("Debug Level - ");
+      TxSerial.println(debug);
+    }
+    else if (Tx == 220 || Tx == 236 || Tx == 255 || RxByte == 220 || RxByte == 255 || (times > 0 && RxByte == 92)) { // if wall switched pushed again, cancel timer
+      //      if (debug >= 1) {
+      //        TxSerial.println("Timer Cancel Request Recieved");
+      //      }
       break;
     }
     else if (RxByte > 0) {
       write_Tx(188);
     }
     RxByte = 0;
+    delay(2000);
   }
-  StopTimer();
+
+  //  if (debug >= 1) {
+  //    TxSerial.println("Timer stopped");
+  //  }
+
+  // Shut down HRV unless timer ended by button push
+  if (RxByte != 220 and RxByte != 92) StopTimer();
+
+  // Return to auto mode and report that ventilation has stopped.
+  autoState = true;
+  cmd = 236;
 }
-/////Stop Timer
+////////////////////// Stop Timer ////////////////////////////////
 void StopTimer(void) {
-  write_Tx(252);
+  write_Tx(252); // Had to guess at this command through trial and error.
   for (int times = 0; times < 10; times++) {
-    wdt_reset();
+    // wdt_reset();
     RxByte = read_Tx();
     if (RxByte != 28) {
-      if (debug >= 4) {
-        TxSerial.println("Timer is waiting for 28...");
-      }
       RxByte = read_Tx();
       delay(400);
     }
@@ -720,12 +710,9 @@ void StopTimer(void) {
     }
   }
   for (int times = 0; times < 10; times++) {
-    wdt_reset();
+    // wdt_reset();
     RxByte = read_Tx();
     if (RxByte != 220) {
-      if (debug >= 4) {
-        TxSerial.println("Timer is waiting for 220...");
-      }
       RxByte = read_Tx();
       delay(400);
     }
@@ -734,20 +721,61 @@ void StopTimer(void) {
       break;
     }
   }
-  autoState = true;
-  cmd = last_cmd; // return HRV to previous state (also puts HRV in listening mode)
-  last_cmd = 0; // make sure command is not ignored as repeat
+  cmd = 236;
 }
 
 ///////////////////////////////// Acknowledge Keep Alive Request //////////////////////////
 void Ak(void) {
-  if (debug >= 4) {
-    TxSerial.println("Sending Acknowledgement");
-  }
   write_Tx(188);
   while (Serial.read() >= 0); // flush the receive buffer
   Serial.flush();
   RxByte = 0;
+}
+
+/////////////////////////////////// Calculate Dewpoint (fast method) ////////////////////////
+//// delta max = 0.6544 wrt dewPoint()
+//// 6.9 x faster than dewPoint()
+//// reference: http://en.wikipedia.org/wiki/Dew_point
+//float dewPointFast(float celsius, float humidity)
+//{
+//  float a = 17.271;
+//  float b = 237.7;
+//  float temp = (a * celsius) / (b + celsius) + log(humidity * 0.01);
+//  // wdt_reset();
+//  float Td = (b * temp) / (a - temp);
+//  return Td;
+//}
+//
+/////////////////////////////////// Calculate Humidity //////////////////////////////////////
+//// reference: http://andrew.rsmas.miami.edu/bmcnoldy/Humidity.html
+//
+//int humidityAdj(float celsius, float dewpoint)
+//{
+//  // wdt_reset();
+//  int humAdj = 100 * (exp((17.625 * dewpoint) / (243.04 + dewpoint)) / exp((17.625 * celsius) / (243.04 + celsius)));
+//  // wdt_reset();
+//  return humAdj;
+//}
+//
+
+///////////////////////////////// Calculate Absolute Humidity /////////////////////////////
+/* References: Formula derived by Peter Mander https://carnotcycle.wordpress.com/2012/08/04/how-to-convert-relative-humidity-to-absolute-humidity/
+   Arduion function copied from http://arduino.ru/forum/proekty/kontrol-vlazhnosti-podvala-arduino-pro-mini
+*/
+float calcAbsH(float t, float h) {
+  float temp;
+  temp = pow(2.718281828, (17.67 * t) / (t + 243.5));
+  return (6.112 * temp * h * 2.1674) / (273.15 + t);
+}
+
+///////////////////////////////// Calculate Relative Humidity /////////////////////////////
+/* References: Formula derived by Peter Mander https://carnotcycle.wordpress.com/2012/08/04/how-to-convert-relative-humidity-to-absolute-humidity/
+   Arduion function copied from http://arduino.ru/forum/proekty/kontrol-vlazhnosti-podvala-arduino-pro-mini
+*/
+float calcRelH(float t, float ah) {
+  float temp;
+  temp = pow(2.718281828, (17.67 * t) / (t + 243.5));
+  return ((273.15 * ah) + (ah * t)) / (13.2471488 * temp);
 }
 
 ///////////////////////////////// Capture EEPROM //////////////////////////////////////////
@@ -755,7 +783,7 @@ void Ak(void) {
 
 //void Capture(void) {
 //  for (int address = 0 ; address < EEPROM.length() ; address++) {
-//    wdt_reset();
+//    // wdt_reset();
 //    byte val = EEPROM.read(address);
 //    if (val == RxByte) {
 //      break;
@@ -779,7 +807,7 @@ void Ak(void) {
 //void readEEPROM(void) {
 //  TxSerial.println("%%%%%%%%%%%%%%%%% EEPROM Values %%%%%%%%%%%%%%%%%");
 //  for (int address = 0 ; address < EEPROM.length() ; address++) {
-//    wdt_reset();
+//    // wdt_reset();
 //    byte val = EEPROM.read(address);
 //    if (val > 0 and val < 255) {
 //      TxSerial.println(val);
@@ -792,8 +820,7 @@ void Ak(void) {
 //}
 ///////////////////////////////// Enter Debug to turn print messages on ///////////////////////
 void Debug(void) {
-  if (debug >= 3) {
-    TxSerial.println("########### Debug Report ###############");
+  if (debug >= 4) {
     TxSerial.print("Debug RxByte: ");
     TxSerial.println(RxByte);
     TxSerial.print("cmd: ");
@@ -802,28 +829,13 @@ void Debug(void) {
     TxSerial.println(last_cmd);
     TxSerial.print("autoState: ");
     TxSerial.println(autoState);
-    TxSerial.print("dhtState: ");
-    TxSerial.println(dhtState);
-    TxSerial.print("dehumPinState: ");
-    TxSerial.println(dehumPinState);
-    TxSerial.print("fanPinState: ");
-    TxSerial.println(fanPinState);
-    //    TxSerial.print("humOn: ");
-    //    TxSerial.println(humOn);
-    //    TxSerial.print("humOff: ");
-    //    TxSerial.println(humOff);
-    //    TxSerial.print("humTarget: ");
-    //    TxSerial.println(humTarget);
-    //    TxSerial.print("hMin: ");
-    //    TxSerial.println(hMin);
-    TxSerial.print("prehumcmd: ");
-    TxSerial.println(prehumcmd);
-    TxSerial.println("########################################");
-    //    if (debug > 3) {
-    //      readEEPROM();
-    //    }
+    TxSerial.print("dehumCall: ");
+    TxSerial.println(dehumCall);
+    TxSerial.print("recircState: ");
+    TxSerial.println(recircState);
+    TxSerial.print("fanOn: ");
+    TxSerial.println(fanOn);
   }
-  //cmd = 0;
 }
 
 //////////////////////////////////////////////////// Clear Eeprom /////////////////////////////////////////////
@@ -842,19 +854,19 @@ void Debug(void) {
 //  TxSerial.print("Clearing EEPROM storage...");
 //  for (int i = 0 ; i < EEPROM.length() ; i++) {
 //    EEPROM.write(i, 0);
-//    wdt_reset();
+//    // wdt_reset();
 //  }
 //  TxSerial.print("Clear EEPROM completed!");
 //}
 
-/////////////////////////////////////////// Interactive Mode for Debugging Only //////////////////////////////
-void interactive() {
-  TxSerial.print("Trying: ");
-  TxSerial.println(cmd);
-  write_Tx(cmd);
-  if (Serial.available()) {
-    byte reply = read_Tx();
-    write_Tx(188);
-  }
-}
+///////////////////////////////////////////// Interactive Mode for Debugging Only //////////////////////////////
+//void interactive() {
+//  TxSerial.print("Trying: ");
+//  TxSerial.println(cmd);
+//  write_Tx(cmd);
+//  if (Serial.available()) {
+//    byte reply = read_Tx();
+//    write_Tx(188);
+//  }
+//}
 
